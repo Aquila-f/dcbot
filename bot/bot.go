@@ -106,47 +106,43 @@ func (b *Bot) syncOnStartup(s *discordgo.Session) error {
 }
 
 func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
-	savedID := b.store.MessageID()
-
-	if savedID != "" {
-		_, err := s.ChannelMessage(b.cfg.RoleChannelID, savedID)
-		if err == nil {
-			if err := b.updateRoleMessage(); err != nil {
-				log.Printf("failed to update existing role message: %v", err)
+	// Try saved ID first as a fast path, then fall back to scanning the channel.
+	msgID, mappings, err := func() (string, map[string]string, error) {
+		if savedID := b.store.MessageID(); savedID != "" {
+			msg, err := s.ChannelMessage(b.cfg.RoleChannelID, savedID)
+			if err == nil {
+				return msg.ID, parseRoleMessage(msg.Content), nil
 			}
-			return savedID, nil
+			log.Printf("saved message not found (%v), scanning channel", err)
 		}
-		log.Printf("saved message not found (%v), scanning channel for existing message", err)
+		return b.findExistingRoleMessage(s)
+	}()
+
+	if err != nil {
+		return "", fmt.Errorf("failed to locate role message: %w", err)
 	}
 
-	if msgID, mappings, err := b.findExistingRoleMessage(s); err == nil && msgID != "" {
-		log.Printf("recovered existing role message %s", msgID)
-		if len(mappings) > 0 {
-			if err := b.store.RecoverMappings(mappings); err != nil {
-				log.Printf("failed to recover mappings: %v", err)
-			} else {
-				log.Printf("recovered %d role mapping(s) from message", len(mappings))
-			}
+	if msgID != "" {
+		// Discord is source of truth — sync store from message content.
+		if err := b.store.SetMappings(mappings); err != nil {
+			log.Printf("failed to sync mappings from Discord: %v", err)
 		}
 		if err := b.store.SetMessageID(msgID); err != nil {
-			return "", fmt.Errorf("failed to save recovered message_id: %w", err)
+			return "", fmt.Errorf("failed to save message_id: %w", err)
 		}
-		if err := b.updateRoleMessage(); err != nil {
-			log.Printf("failed to update recovered role message: %v", err)
-		}
+		log.Printf("loaded %d role mapping(s) from Discord message %s", len(mappings), msgID)
 		return msgID, nil
 	}
 
+	// No message on Discord — create one from whatever is in the store.
 	content := buildRoleMessageContent(b.cfg.RoleMessageHeader, b.store.Roles())
 	msg, err := s.ChannelMessageSend(b.cfg.RoleChannelID, content)
 	if err != nil {
 		return "", fmt.Errorf("failed to send role message: %w", err)
 	}
-
 	if err := b.store.SetMessageID(msg.ID); err != nil {
 		return "", fmt.Errorf("failed to save message_id: %w", err)
 	}
-
 	return msg.ID, nil
 }
 

@@ -105,18 +105,15 @@ func (s *RoleStore) Add(emoji, roleID string) error {
 	return nil
 }
 
-func (s *RoleStore) RecoverMappings(roles map[string]string) error {
+func (s *RoleStore) SetMappings(roles map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.d.Roles) > 0 {
-		return nil
-	}
-
+	old := s.d.Roles
 	s.d.Roles = roles
 	if err := s.save(); err != nil {
-		s.d.Roles = make(map[string]string)
-		return fmt.Errorf("failed to save recovered mappings: %w", err)
+		s.d.Roles = old
+		return fmt.Errorf("failed to save mappings: %w", err)
 	}
 	return nil
 }
