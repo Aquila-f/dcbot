@@ -7,6 +7,7 @@ import (
 	"dcbot/util"
 	"fmt"
 	"log"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -118,8 +119,15 @@ func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
 		log.Printf("saved message not found (%v), scanning channel for existing message", err)
 	}
 
-	if msgID, err := b.findExistingRoleMessage(s); err == nil && msgID != "" {
+	if msgID, mappings, err := b.findExistingRoleMessage(s); err == nil && msgID != "" {
 		log.Printf("recovered existing role message %s", msgID)
+		if len(mappings) > 0 {
+			if err := b.store.RecoverMappings(mappings); err != nil {
+				log.Printf("failed to recover mappings: %v", err)
+			} else {
+				log.Printf("recovered %d role mapping(s) from message", len(mappings))
+			}
+		}
 		if err := b.store.SetMessageID(msgID); err != nil {
 			return "", fmt.Errorf("failed to save recovered message_id: %w", err)
 		}
@@ -129,7 +137,7 @@ func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
 		return msgID, nil
 	}
 
-	content := buildRoleMessageContent(b.store.Roles())
+	content := buildRoleMessageContent(b.cfg.RoleMessageHeader, b.store.Roles())
 	msg, err := s.ChannelMessageSend(b.cfg.RoleChannelID, content)
 	if err != nil {
 		return "", fmt.Errorf("failed to send role message: %w", err)
@@ -142,15 +150,31 @@ func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
 	return msg.ID, nil
 }
 
-func (b *Bot) findExistingRoleMessage(s *discordgo.Session) (string, error) {
+func (b *Bot) findExistingRoleMessage(s *discordgo.Session) (string, map[string]string, error) {
 	msgs, err := s.ChannelMessages(b.cfg.RoleChannelID, 1, "", "", "")
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if len(msgs) == 1 && msgs[0].Author.ID == s.State.User.ID {
-		return msgs[0].ID, nil
+		return msgs[0].ID, parseRoleMessage(msgs[0].Content), nil
 	}
-	return "", nil
+	return "", nil, nil
+}
+
+var roleLineRe = regexp.MustCompile(`^(.+) → <@&(\d+)>$`)
+
+func parseRoleMessage(content string) map[string]string {
+	parts := strings.SplitN(content, "\n---\n", 2)
+	if len(parts) < 2 {
+		return nil
+	}
+	roles := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimRight(parts[1], "\n"), "\n") {
+		if m := roleLineRe.FindStringSubmatch(line); m != nil {
+			roles[m[1]] = m[2]
+		}
+	}
+	return roles
 }
 
 func (b *Bot) updateRoleMessage() error {
@@ -158,7 +182,7 @@ func (b *Bot) updateRoleMessage() error {
 	if msgID == "" {
 		return nil
 	}
-	content := buildRoleMessageContent(b.store.Roles())
+	content := buildRoleMessageContent(b.cfg.RoleMessageHeader, b.store.Roles())
 	_, err := b.session.ChannelMessageEdit(b.cfg.RoleChannelID, msgID, content)
 	return err
 }
@@ -245,9 +269,9 @@ func hasMemberRole(member *discordgo.Member, roleID string) bool {
 	return slices.Contains(member.Roles, roleID)
 }
 
-func buildRoleMessageContent(roles map[string]string) string {
+func buildRoleMessageContent(header string, roles map[string]string) string {
 	if len(roles) == 0 {
-		return "**Role Assignment**\n\nNo roles configured yet. An admin can use `/addrole` to add roles."
+		return header + "\n\nNo roles configured yet. An admin can use `/addrole` to add roles."
 	}
 
 	emojis := make([]string, 0, len(roles))
@@ -257,10 +281,8 @@ func buildRoleMessageContent(roles map[string]string) string {
 	sort.Strings(emojis)
 
 	var sb strings.Builder
-	sb.WriteString("**Role Assignment**\n\n")
-	sb.WriteString("React to this message to receive a role.\n")
-	sb.WriteString("Removing your reaction will revoke the role automatically.\n\n")
-	sb.WriteString("**Available Roles**\n")
+	sb.WriteString(header)
+	sb.WriteString("\n---\n")
 	for _, emoji := range emojis {
 		fmt.Fprintf(&sb, "%s → <@&%s>\n", emoji, roles[emoji])
 	}
