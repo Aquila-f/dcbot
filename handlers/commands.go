@@ -25,10 +25,13 @@ func isValidEmoji(s string) bool {
 	return false
 }
 
+var manageRolesPerm = int64(discordgo.PermissionManageRoles)
+
 var Commands = []*discordgo.ApplicationCommand{
 	{
-		Name:        "addrole",
-		Description: "Map an emoji to a role for reaction-based role assignment",
+		Name:                     "addrole",
+		Description:              "Map an emoji to a role for reaction-based role assignment",
+		DefaultMemberPermissions: &manageRolesPerm,
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
@@ -45,8 +48,9 @@ var Commands = []*discordgo.ApplicationCommand{
 		},
 	},
 	{
-		Name:        "removerole",
-		Description: "Remove an emoji-to-role mapping",
+		Name:                     "removerole",
+		Description:              "Remove an emoji-to-role mapping",
+		DefaultMemberPermissions: &manageRolesPerm,
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionString,
