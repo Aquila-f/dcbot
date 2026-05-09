@@ -115,7 +115,18 @@ func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
 			}
 			return savedID, nil
 		}
-		log.Printf("saved message not found (%v), creating new one", err)
+		log.Printf("saved message not found (%v), scanning channel for existing message", err)
+	}
+
+	if msgID, err := b.findExistingRoleMessage(s); err == nil && msgID != "" {
+		log.Printf("recovered existing role message %s", msgID)
+		if err := b.store.SetMessageID(msgID); err != nil {
+			return "", fmt.Errorf("failed to save recovered message_id: %w", err)
+		}
+		if err := b.updateRoleMessage(); err != nil {
+			log.Printf("failed to update recovered role message: %v", err)
+		}
+		return msgID, nil
 	}
 
 	content := buildRoleMessageContent(b.store.Roles())
@@ -129,6 +140,17 @@ func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
 	}
 
 	return msg.ID, nil
+}
+
+func (b *Bot) findExistingRoleMessage(s *discordgo.Session) (string, error) {
+	msgs, err := s.ChannelMessages(b.cfg.RoleChannelID, 1, "", "", "")
+	if err != nil {
+		return "", err
+	}
+	if len(msgs) == 1 && msgs[0].Author.ID == s.State.User.ID {
+		return msgs[0].ID, nil
+	}
+	return "", nil
 }
 
 func (b *Bot) updateRoleMessage() error {
