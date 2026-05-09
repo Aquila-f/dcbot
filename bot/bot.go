@@ -235,7 +235,10 @@ func buildRoleMessageContent(roles map[string]string) string {
 	sort.Strings(emojis)
 
 	var sb strings.Builder
-	sb.WriteString("**Role Assignment**\n\nReact to claim a role:\n\n")
+	sb.WriteString("**Role Assignment**\n\n")
+	sb.WriteString("React to this message to receive a role.\n")
+	sb.WriteString("Removing your reaction will revoke the role automatically.\n\n")
+	sb.WriteString("**Available Roles**\n")
 	for _, emoji := range emojis {
 		fmt.Fprintf(&sb, "%s → <@&%s>\n", emoji, roles[emoji])
 	}
