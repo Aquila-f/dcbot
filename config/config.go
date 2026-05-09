@@ -7,10 +7,13 @@ import (
 	"github.com/joho/godotenv"
 )
 
+const defaultRoleMessageHeader = "**Role Assignment**\n\nReact to this message to receive a role.\nRemoving your reaction will revoke the role automatically."
+
 type AppConfig struct {
-	Token          string
-	RoleChannelID  string
-	AdminChannelID string
+	Token             string
+	RoleChannelID     string
+	AdminChannelID    string
+	RoleMessageHeader string
 }
 
 func Load() (*AppConfig, error) {
@@ -31,9 +34,15 @@ func Load() (*AppConfig, error) {
 		return nil, fmt.Errorf("ADMIN_CHANNEL_ID is not set")
 	}
 
+	header := os.Getenv("ROLE_MESSAGE_HEADER")
+	if header == "" {
+		header = defaultRoleMessageHeader
+	}
+
 	return &AppConfig{
-		Token:          token,
-		RoleChannelID:  channelID,
-		AdminChannelID: adminChannelID,
+		Token:             token,
+		RoleChannelID:     channelID,
+		AdminChannelID:    adminChannelID,
+		RoleMessageHeader: header,
 	}, nil
 }
