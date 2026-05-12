@@ -17,6 +17,7 @@ type AppConfig struct {
 	Token             string
 	RoleChannelID     string
 	AdminChannelID    string
+	LeetcodeChannelID string
 	RoleMessageHeader string
 	Location          *time.Location
 }
@@ -57,6 +58,7 @@ func Load() (*AppConfig, error) {
 		Token:             token,
 		RoleChannelID:     channelID,
 		AdminChannelID:    adminChannelID,
+		LeetcodeChannelID: os.Getenv("LEETCODE_CHANNEL_ID"),
 		RoleMessageHeader: header,
 		Location:          loc,
 	}, nil

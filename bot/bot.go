@@ -4,6 +4,7 @@ import (
 	"dcbot/config"
 	"dcbot/handlers"
 	"dcbot/scheduler"
+	"dcbot/scheduler/tasks"
 	"dcbot/store"
 	"dcbot/util"
 	"fmt"
@@ -66,6 +67,13 @@ func (b *Bot) Start() error {
 	if err := <-errCh; err != nil {
 		b.Stop()
 		return err
+	}
+
+	if b.cfg.LeetcodeChannelID != "" {
+		if err := b.scheduler.Register("0 9 * * *", &tasks.LeetcodeDaily{ChannelID: b.cfg.LeetcodeChannelID}); err != nil {
+			b.Stop()
+			return fmt.Errorf("register leetcode-daily: %w", err)
+		}
 	}
 
 	b.scheduler.Start()
