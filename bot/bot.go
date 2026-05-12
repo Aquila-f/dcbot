@@ -3,6 +3,7 @@ package bot
 import (
 	"dcbot/config"
 	"dcbot/handlers"
+	"dcbot/scheduler"
 	"dcbot/store"
 	"dcbot/util"
 	"fmt"
@@ -16,9 +17,10 @@ import (
 )
 
 type Bot struct {
-	session       *discordgo.Session
-	cfg           *config.AppConfig
-	store         *store.RoleStore
+	session        *discordgo.Session
+	cfg            *config.AppConfig
+	store          *store.RoleStore
+	scheduler      *scheduler.Scheduler
 	registeredCmds []*discordgo.ApplicationCommand
 }
 
@@ -31,7 +33,12 @@ func New(cfg *config.AppConfig, st *store.RoleStore) (*Bot, error) {
 		discordgo.IntentsGuildMessageReactions |
 		discordgo.IntentsGuildMembers
 
-	return &Bot{session: session, cfg: cfg, store: st}, nil
+	return &Bot{
+		session:   session,
+		cfg:       cfg,
+		store:     st,
+		scheduler: scheduler.New(session, cfg.AdminChannelID, cfg.Location),
+	}, nil
 }
 
 func (b *Bot) Start() error {
@@ -60,10 +67,13 @@ func (b *Bot) Start() error {
 		b.Stop()
 		return err
 	}
+
+	b.scheduler.Start()
 	return nil
 }
 
 func (b *Bot) Stop() {
+	b.scheduler.Stop()
 	for _, cmd := range b.registeredCmds {
 		guilds := b.session.State.Guilds
 		for _, g := range guilds {

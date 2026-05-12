@@ -3,17 +3,22 @@ package config
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
-const defaultRoleMessageHeader = "**Role Assignment**\n\nReact to this message to receive a role.\nRemoving your reaction will revoke the role automatically."
+const (
+	defaultRoleMessageHeader = "**Role Assignment**\n\nReact to this message to receive a role.\nRemoving your reaction will revoke the role automatically."
+	defaultTZ                = "Asia/Taipei"
+)
 
 type AppConfig struct {
 	Token             string
 	RoleChannelID     string
 	AdminChannelID    string
 	RoleMessageHeader string
+	Location          *time.Location
 }
 
 func Load() (*AppConfig, error) {
@@ -39,10 +44,20 @@ func Load() (*AppConfig, error) {
 		header = defaultRoleMessageHeader
 	}
 
+	tz := os.Getenv("TZ")
+	if tz == "" {
+		tz = defaultTZ
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TZ %q: %w", tz, err)
+	}
+
 	return &AppConfig{
 		Token:             token,
 		RoleChannelID:     channelID,
 		AdminChannelID:    adminChannelID,
 		RoleMessageHeader: header,
+		Location:          loc,
 	}, nil
 }
