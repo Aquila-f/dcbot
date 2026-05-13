@@ -26,6 +26,11 @@ const sampleResponse = `{
   }
 }`
 
+const sampleRatings = `[
+  {"ID": 1,    "Rating": 1234.5},
+  {"ID": 9999, "Rating": 2500.0}
+]`
+
 func newMockServer(t *testing.T, status int, body string, capture *http.Request) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +46,12 @@ func newMockServer(t *testing.T, status int, body string, capture *http.Request)
 
 func TestBuild_Success(t *testing.T) {
 	var seen http.Request
-	srv := newMockServer(t, 200, sampleResponse, &seen)
-	defer srv.Close()
+	daily := newMockServer(t, 200, sampleResponse, &seen)
+	defer daily.Close()
+	rating := newMockServer(t, 200, sampleRatings, nil)
+	defer rating.Close()
 
-	task := &LeetcodeDaily{ChannelID: "chan-1", Endpoint: srv.URL}
+	task := &LeetcodeDaily{ChannelID: "chan-1", Endpoint: daily.URL, RatingEndpoint: rating.URL}
 	payload, err := task.Build(context.Background())
 	if err != nil {
 		t.Fatalf("Build returned error: %v", err)
@@ -66,14 +73,17 @@ func TestBuild_Success(t *testing.T) {
 	if e.Color != colorEasy {
 		t.Errorf("Color = %#x, want %#x", e.Color, colorEasy)
 	}
-	if len(e.Fields) != 2 {
-		t.Fatalf("expected 2 fields, got %d", len(e.Fields))
+	if len(e.Fields) != 3 {
+		t.Fatalf("expected 3 fields, got %d", len(e.Fields))
 	}
 	if e.Fields[0].Value != "Easy" {
 		t.Errorf("Difficulty field = %q", e.Fields[0].Value)
 	}
-	if e.Fields[1].Value != "Array, Hash Table" {
-		t.Errorf("Tags field = %q", e.Fields[1].Value)
+	if e.Fields[1].Value != "1235" {
+		t.Errorf("Rating field = %q, want 1235 (rounded from 1234.5)", e.Fields[1].Value)
+	}
+	if e.Fields[2].Value != "||Array, Hash Table||" {
+		t.Errorf("Tags field = %q", e.Fields[2].Value)
 	}
 	if e.Footer == nil || !strings.Contains(e.Footer.Text, "2026-05-13") {
 		t.Errorf("Footer = %+v", e.Footer)
@@ -93,6 +103,38 @@ func TestBuild_Success(t *testing.T) {
 	}
 	if !strings.Contains(sentBody["query"], "activeDailyCodingChallengeQuestion") {
 		t.Errorf("query missing expected field: %q", sentBody["query"])
+	}
+}
+
+func TestBuild_RatingNotFound(t *testing.T) {
+	daily := newMockServer(t, 200, sampleResponse, nil)
+	defer daily.Close()
+	rating := newMockServer(t, 200, `[{"ID": 9999, "Rating": 2500}]`, nil)
+	defer rating.Close()
+
+	task := &LeetcodeDaily{ChannelID: "c", Endpoint: daily.URL, RatingEndpoint: rating.URL}
+	payload, err := task.Build(context.Background())
+	if err != nil {
+		t.Fatalf("Build returned error: %v", err)
+	}
+	if got := payload.Embeds[0].Fields[1].Value; got != missingValue {
+		t.Errorf("Rating field = %q, want %q", got, missingValue)
+	}
+}
+
+func TestBuild_RatingEndpointFails(t *testing.T) {
+	daily := newMockServer(t, 200, sampleResponse, nil)
+	defer daily.Close()
+	rating := newMockServer(t, 500, "boom", nil)
+	defer rating.Close()
+
+	task := &LeetcodeDaily{ChannelID: "c", Endpoint: daily.URL, RatingEndpoint: rating.URL}
+	payload, err := task.Build(context.Background())
+	if err != nil {
+		t.Fatalf("rating fetch should be best-effort, got error: %v", err)
+	}
+	if got := payload.Embeds[0].Fields[1].Value; got != missingValue {
+		t.Errorf("Rating field = %q, want %q", got, missingValue)
 	}
 }
 
