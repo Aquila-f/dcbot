@@ -3,6 +3,7 @@ package bot
 import (
 	"dcbot/config"
 	"dcbot/handlers"
+	"dcbot/llm"
 	"dcbot/scheduler"
 	"dcbot/scheduler/tasks"
 	"dcbot/store"
@@ -45,9 +46,16 @@ func New(cfg *config.AppConfig, st *store.RoleStore) (*Bot, error) {
 func (b *Bot) Start() error {
 	cmdHandler := handlers.NewCommandHandler(b.store, b.cfg.RoleChannelID, b.cfg.AdminChannelID, b.updateRoleMessage)
 
+	persona, err := llm.NewPersona(b.cfg.LLM.SystemPromptPath, b.cfg.Location)
+	if err != nil {
+		return fmt.Errorf("load persona: %w", err)
+	}
+	chatHandler := handlers.NewChatHandler(llm.New(b.cfg.LLM), persona, b.cfg.LLM.HistoryDepth)
+
 	b.session.AddHandler(handlers.ReactionAdd(b.session, b.store))
 	b.session.AddHandler(handlers.ReactionRemove(b.session, b.store))
 	b.session.AddHandler(cmdHandler.Handle)
+	b.session.AddHandler(chatHandler.Handle)
 
 	errCh := make(chan error, 1)
 	b.session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
