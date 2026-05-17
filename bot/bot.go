@@ -3,7 +3,6 @@ package bot
 import (
 	"dcbot/config"
 	"dcbot/handlers"
-	"dcbot/llm"
 	"dcbot/scheduler"
 	"dcbot/scheduler/tasks"
 	"dcbot/store"
@@ -44,13 +43,13 @@ func New(cfg *config.AppConfig, st *store.RoleStore) (*Bot, error) {
 }
 
 func (b *Bot) Start() error {
+	// cmdHandler dispatches user-invoked slash commands (e.g. /addrole).
 	cmdHandler := handlers.NewCommandHandler(b.store, b.cfg.RoleChannelID, b.cfg.AdminChannelID, b.updateRoleMessage)
 
-	persona, err := llm.NewPersona(b.cfg.LLM.SystemPromptPath, b.cfg.Location)
+	chatHandler, err := handlers.NewChatHandler(b.cfg.LLM, b.cfg.Location)
 	if err != nil {
-		return fmt.Errorf("load persona: %w", err)
+		return fmt.Errorf("init chat handler: %w", err)
 	}
-	chatHandler := handlers.NewChatHandler(llm.New(b.cfg.LLM), persona, b.cfg.LLM.HistoryDepth)
 
 	b.session.AddHandler(handlers.ReactionAdd(b.session, b.store))
 	b.session.AddHandler(handlers.ReactionRemove(b.session, b.store))

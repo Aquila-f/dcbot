@@ -2,10 +2,14 @@ package handlers
 
 import (
 	"context"
+"dcbot/config"
 	"dcbot/llm"
+"fmt"
 	"log"
 	"regexp"
+"sort"
 	"strings"
+"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -21,11 +25,16 @@ type ChatHandler struct {
 	depth   int
 }
 
-func NewChatHandler(client *llm.Client, persona *llm.Persona, depth int) *ChatHandler {
+func NewChatHandler(cfg config.LLMConfig, loc *time.Location) (*ChatHandler, error) {
+persona, err := llm.NewPersona(cfg.SystemPromptPath, loc)
+	if err != nil {
+		return nil, fmt.Errorf("load persona: %w", err)
+	}
+depth := cfg.HistoryDepth
 	if depth <= 0 {
 		depth = 5
 	}
-	return &ChatHandler{llm: client, persona: persona, depth: depth}
+	return &ChatHandler{llm: llm.New(cfg), persona: persona, depth: depth}, nil
 }
 
 func (h *ChatHandler) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
