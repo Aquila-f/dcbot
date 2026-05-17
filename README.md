@@ -17,7 +17,7 @@ The bot is a thin host (`bot/`) that wires modules together through interfaces d
 | `EventSubscriber` | Module attaches gateway event handlers (messages, reactions, members…). |
 | `ReadyHook` | Module runs work after the gateway `READY` event (e.g. reconciling state with Discord). |
 
-A module implements whichever subset it needs and is registered in `bot.Bot.Start()`. Existing modules live under `modules/` (one package per module). Recurring jobs run through `scheduler/` and implement the `scheduler.Task` interface.
+A module implements whichever subset it needs and is registered in `bot.Bot.Start()`. Existing modules live under `modules/` (one package per module). Recurring jobs run through `scheduler/`: a module that owns scheduled work implements `domain.TaskProvider`, and each task implements `domain.Task`.
 
 ### Reaction roles
 
@@ -87,9 +87,8 @@ When adding the bot to a server, it needs:
 
 Tracked here until they get their own fix commits.
 
-- **Scheduler is wired outside the module system.** `bot.Bot.Start()` directly registers `tasks.LeetcodeDaily` on the scheduler, so adding a task means editing the bot. A `domain.ScheduledJobs` interface (or making tasks first-class modules) would make this symmetric with command/event modules.
-- **`scheduler/tasks` imports `scheduler`** for the `Payload` type, which gives the `scheduler` ← `tasks` dependency the wrong direction. The shared contract (`Task`, `Payload`) should live in a neutral package both sides depend on.
 - **`AppConfig` is becoming a god struct.** Some modules receive a sliced config (`LLMConfig`, `RolesConfig`), others (scheduler) read fields directly off `AppConfig`. Pick one style.
+- **Cron specs are hardcoded in each module** (e.g. `modules/leetcode` posts at 09:00 in `TZ`). The timezone is configurable via the `TZ` env var, but the hour is not — modules should be able to take the schedule from config if we want per-deployment tuning.
 - **`roles.json` path is hardcoded to the working directory.** Changing the cwd creates a fresh store. Should be configurable.
 - **Chat reply truncation cuts UTF-8 bytes.** `reply[:2000]` in `modules/chat` can split a multi-byte character. Should truncate on rune boundaries.
 - **Role message recovery only inspects the last channel message.** If anything posts in the role channel after the bot's message, recovery fails and a duplicate may be created. Should scan further back for a bot-authored message.
