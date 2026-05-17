@@ -5,12 +5,11 @@ import (
 	"dcbot/config"
 	"dcbot/domain"
 	"dcbot/modules/chat"
+	"dcbot/modules/leetcode"
 	"dcbot/modules/roles"
 	"dcbot/scheduler"
-	"dcbot/scheduler/tasks"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -47,18 +46,50 @@ func New(cfg *config.AppConfig) (*Bot, error) {
 }
 
 func (b *Bot) Start() error {
+	if err := b.buildModules(); err != nil {
+		return err
+	}
+
+	// AddHandler must run before Open or early events get dropped.
+	readyErr := b.installCoreHandlers()
+	b.registerEventSubscribers()
+	if err := b.registerTaskProviders(); err != nil {
+		return err
+	}
+
+	if err := b.session.Open(); err != nil {
+		return err
+	}
+	if err := <-readyErr; err != nil {
+		b.Stop()
+		return err
+	}
+
+	b.scheduler.Start()
+	return nil
+}
+
+func (b *Bot) buildModules() error {
 	rolesHandler, err := roles.New(b.cfg.Roles, b.cfg.AdminChannelID)
 	if err != nil {
 		return fmt.Errorf("init roles handler: %w", err)
 	}
-
 	chatHandler, err := chat.New(b.cfg.LLM, b.cfg.Location)
 	if err != nil {
 		return fmt.Errorf("init chat handler: %w", err)
 	}
-	b.modules = []domain.Module{rolesHandler, chatHandler}
 
-	b.registerEventSubscribers()
+	b.modules = []domain.Module{rolesHandler, chatHandler}
+	if b.cfg.LeetcodeChannelID != "" {
+		b.modules = append(b.modules, leetcode.New(b.cfg.LeetcodeChannelID))
+	}
+	return nil
+}
+
+// installCoreHandlers wires the bot's own session listeners: slash-command
+// dispatch, and the READY-time orchestration that runs module command
+// registration + ready hooks.
+func (b *Bot) installCoreHandlers() <-chan error {
 	b.session.AddHandler(b.dispatchInteraction)
 
 	readyErr := make(chan error, 1)
@@ -67,25 +98,7 @@ func (b *Bot) Start() error {
 		b.registerCommandProviders(s, r)
 		readyErr <- b.runReadyHooks(s, r)
 	})
-
-	if err := b.session.Open(); err != nil {
-		return err
-	}
-
-	if err := <-readyErr; err != nil {
-		b.Stop()
-		return err
-	}
-
-	if b.cfg.LeetcodeChannelID != "" {
-		if err := b.scheduler.Register("0 9 * * *", &tasks.LeetcodeDaily{ChannelID: b.cfg.LeetcodeChannelID}); err != nil {
-			b.Stop()
-			return fmt.Errorf("register leetcode-daily: %w", err)
-		}
-	}
-
-	b.scheduler.Start()
-	return nil
+	return readyErr
 }
 
 func (b *Bot) Stop() {
@@ -119,12 +132,7 @@ func (b *Bot) registerCommandProviders(s *discordgo.Session, r *discordgo.Ready)
 		}
 		for _, cmd := range cp.Commands() {
 			b.commandTable[cmd.Definition.Name] = cmd.Handler
-			log.Printf("[%s] /%s — %s (allowed: %s)",
-				m.Name(),
-				cmd.Definition.Name,
-				cmd.Definition.Description,
-				describePermissions(cmd.Definition.DefaultMemberPermissions),
-			)
+			log.Printf("[%s] /%s — %s", m.Name(), cmd.Definition.Name, cmd.Definition.Description)
 			for _, guild := range r.Guilds {
 				registered, err := s.ApplicationCommandCreate(s.State.User.ID, guild.ID, cmd.Definition)
 				if err != nil {
@@ -137,41 +145,20 @@ func (b *Bot) registerCommandProviders(s *discordgo.Session, r *discordgo.Ready)
 	}
 }
 
-var knownPermissions = []struct {
-	bit  int64
-	name string
-}{
-	{discordgo.PermissionAdministrator, "Administrator"},
-	{discordgo.PermissionManageRoles, "ManageRoles"},
-	{discordgo.PermissionManageChannels, "ManageChannels"},
-	{discordgo.PermissionManageMessages, "ManageMessages"},
-	{discordgo.PermissionManageWebhooks, "ManageWebhooks"},
-	{discordgo.PermissionKickMembers, "KickMembers"},
-	{discordgo.PermissionBanMembers, "BanMembers"},
-	{discordgo.PermissionModerateMembers, "ModerateMembers"},
-}
-
-// describePermissions renders DefaultMemberPermissions for log output.
-// nil = no restriction (everyone); 0 = hidden from everyone except admins.
-func describePermissions(p *int64) string {
-	if p == nil {
-		return "everyone"
-	}
-	if *p == 0 {
-		return "admins only"
-	}
-	var names []string
-	remaining := *p
-	for _, kp := range knownPermissions {
-		if remaining&kp.bit != 0 {
-			names = append(names, kp.name)
-			remaining &^= kp.bit
+func (b *Bot) registerTaskProviders() error {
+	for _, m := range b.modules {
+		tp, ok := m.(domain.TaskProvider)
+		if !ok {
+			continue
+		}
+		for _, st := range tp.Tasks() {
+			if err := b.scheduler.Register(st.Spec, st.Task); err != nil {
+				return fmt.Errorf("module %s: register %s: %w", m.Name(), st.Task.Name(), err)
+			}
+			log.Printf("[%s] scheduled %s @ %q", m.Name(), st.Task.Name(), st.Spec)
 		}
 	}
-	if remaining != 0 {
-		names = append(names, fmt.Sprintf("0x%x", remaining))
-	}
-	return strings.Join(names, "+")
+	return nil
 }
 
 func (b *Bot) runReadyHooks(s *discordgo.Session, r *discordgo.Ready) error {

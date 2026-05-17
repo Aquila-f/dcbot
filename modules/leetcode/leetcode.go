@@ -1,4 +1,4 @@
-package tasks
+package leetcode
 
 import (
 	"bytes"
@@ -22,6 +22,7 @@ const (
 	leetcodeBaseURL         = "https://leetcode.com"
 	leetcodeQuery           = `query questionOfToday { activeDailyCodingChallengeQuestion { date link question { difficulty frontendQuestionId: questionFrontendId title titleSlug topicTags { name } } } }`
 	missingValue            = "—"
+	dailyCronSpec           = "0 9 * * *"
 )
 
 const (
@@ -30,6 +31,27 @@ const (
 	colorHard    = 0xEF4743
 	colorUnknown = 0x95A5A6
 )
+
+var (
+	_ domain.Module       = (*Module)(nil)
+	_ domain.TaskProvider = (*Module)(nil)
+)
+
+// Module wires LeetcodeDaily into the bot as a scheduled task provider.
+type Module struct {
+	daily *LeetcodeDaily
+}
+
+// New returns a Module that schedules the daily LeetCode posting.
+func New(channelID string) *Module {
+	return &Module{daily: &LeetcodeDaily{ChannelID: channelID}}
+}
+
+func (m *Module) Name() string { return "leetcode" }
+
+func (m *Module) Tasks() []domain.ScheduledTask {
+	return []domain.ScheduledTask{{Spec: dailyCronSpec, Task: m.daily}}
+}
 
 type LeetcodeDaily struct {
 	ChannelID      string

@@ -5,7 +5,7 @@ import (
 	"log"
 
 	"dcbot/config"
-	"dcbot/scheduler/tasks"
+	"dcbot/modules/leetcode"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -28,7 +28,7 @@ func main() {
 	}
 	defer session.Close()
 
-	task := &tasks.LeetcodeDaily{ChannelID: cfg.LeetcodeChannelID}
+	task := &leetcode.LeetcodeDaily{ChannelID: cfg.LeetcodeChannelID}
 	payload, err := task.Build(context.Background())
 	if err != nil {
 		log.Fatalf("build: %v", err)
