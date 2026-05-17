@@ -116,9 +116,9 @@ func (h *Handler) triggered(s *discordgo.Session, m *discordgo.MessageCreate, bo
 
 // fetchHistory returns messages in chronological order (oldest first), excluding m itself.
 // Sources, combined and deduped by message ID:
-//   1. Reply chain walked up from m.MessageReference (up to depth)
-//   2. Time-window fill from m.ChannelID before m.ID (until depth total)
-//   3. Thread parent message (always-on, exempt from depth budget)
+//  1. Reply chain walked up from m.MessageReference (up to depth)
+//  2. Time-window fill from m.ChannelID before m.ID (until depth total)
+//  3. Thread parent message (always-on, exempt from depth budget)
 func (h *Handler) fetchHistory(s *discordgo.Session, m *discordgo.MessageCreate) []*discordgo.Message {
 	if h.depth <= 0 {
 		return nil
