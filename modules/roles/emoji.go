@@ -1,4 +1,4 @@
-package util
+package roles
 
 import "github.com/bwmarrin/discordgo"
 

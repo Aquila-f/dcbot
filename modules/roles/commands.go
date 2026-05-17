@@ -1,8 +1,7 @@
-package handlers
+package roles
 
 import (
-	"dcbot/store"
-	"dcbot/util"
+	"dcbot/domain"
 	"fmt"
 	"log"
 	"regexp"
@@ -27,81 +26,56 @@ func isValidEmoji(s string) bool {
 
 var manageRolesPerm = int64(discordgo.PermissionManageRoles)
 
-var Commands = []*discordgo.ApplicationCommand{
-	{
-		Name:                     "addrole",
-		Description:              "Map an emoji to a role for reaction-based role assignment",
-		DefaultMemberPermissions: &manageRolesPerm,
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "emoji",
-				Description: "The emoji to react with",
-				Required:    true,
-			},
-			{
-				Type:        discordgo.ApplicationCommandOptionRole,
-				Name:        "role",
-				Description: "The role to assign",
-				Required:    true,
-			},
+var addRoleCmd = &discordgo.ApplicationCommand{
+	Name:                     "addrole",
+	Description:              "Map an emoji to a role for reaction-based role assignment",
+	DefaultMemberPermissions: &manageRolesPerm,
+	Options: []*discordgo.ApplicationCommandOption{
+		{
+			Type:        discordgo.ApplicationCommandOptionString,
+			Name:        "emoji",
+			Description: "The emoji to react with",
+			Required:    true,
 		},
-	},
-	{
-		Name:                     "removerole",
-		Description:              "Remove an emoji-to-role mapping",
-		DefaultMemberPermissions: &manageRolesPerm,
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
-				Name:        "emoji",
-				Description: "The emoji mapping to remove",
-				Required:    true,
-			},
+		{
+			Type:        discordgo.ApplicationCommandOptionRole,
+			Name:        "role",
+			Description: "The role to assign",
+			Required:    true,
 		},
 	},
 }
 
-type CommandHandler struct {
-	store          *store.RoleStore
-	roleChannelID  string
-	adminChannelID string
-	updateMessage  func() error
+var removeRoleCmd = &discordgo.ApplicationCommand{
+	Name:                     "removerole",
+	Description:              "Remove an emoji-to-role mapping",
+	DefaultMemberPermissions: &manageRolesPerm,
+	Options: []*discordgo.ApplicationCommandOption{
+		{
+			Type:        discordgo.ApplicationCommandOptionString,
+			Name:        "emoji",
+			Description: "The emoji mapping to remove",
+			Required:    true,
+		},
+	},
 }
 
-func NewCommandHandler(st *store.RoleStore, roleChannelID, adminChannelID string, updateMessage func() error) *CommandHandler {
-	return &CommandHandler{
-		store:          st,
-		roleChannelID:  roleChannelID,
-		adminChannelID: adminChannelID,
-		updateMessage:  updateMessage,
-	}
-}
-
-func (h *CommandHandler) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
-
-	if i.ChannelID != h.adminChannelID {
-		reply(s, i, "This command can only be used in the admin channel.")
-		return
-	}
-
-	if !hasManageRoles(i.Member) {
-		reply(s, i, "You need the Manage Roles permission to use this command.")
-		return
-	}
-
-	switch i.ApplicationCommandData().Name {
-	case "addrole":
-		h.handleAddRole(s, i)
-	case "removerole":
-		h.handleRemoveRole(s, i)
+// requireAdmin wraps a handler with the role-admin channel and permission checks.
+func (m *Manager) requireAdmin(h domain.InteractionHandler) domain.InteractionHandler {
+	return func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		if i.ChannelID != m.adminChannelID {
+			reply(s, i, "This command can only be used in the admin channel.")
+			return
+		}
+		if !hasManageRoles(i.Member) {
+			reply(s, i, "You need the Manage Roles permission to use this command.")
+			return
+		}
+		h(s, i)
 	}
 }
 
-func (h *CommandHandler) handleAddRole(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (m *Manager) handleAddRole(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	options := i.ApplicationCommandData().Options
 	emoji := strings.TrimSpace(options[0].StringValue())
 	role := options[1].RoleValue(s, i.GuildID)
@@ -116,20 +90,20 @@ func (h *CommandHandler) handleAddRole(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	if err := h.store.Add(emoji, role.ID); err != nil {
+	if err := m.store.Add(emoji, role.ID); err != nil {
 		reply(s, i, fmt.Sprintf("Error: %s", err.Error()))
 		return
 	}
 
-	if err := h.updateMessage(); err != nil {
-		_ = h.store.Remove(emoji)
+	if err := m.updateRoleMessage(s); err != nil {
+		_ = m.store.Remove(emoji)
 		reply(s, i, fmt.Sprintf("Error: failed to update role message: %s", err.Error()))
 		return
 	}
 
-	msgID := h.store.MessageID()
+	msgID := m.store.MessageID()
 	if msgID != "" {
-		if err := s.MessageReactionAdd(h.roleChannelID, msgID, util.EmojiForAPI(emoji)); err != nil {
+		if err := s.MessageReactionAdd(m.roleChannelID, msgID, EmojiForAPI(emoji)); err != nil {
 			log.Printf("failed to add reaction %s to message: %v", emoji, err)
 		}
 	}
@@ -137,26 +111,26 @@ func (h *CommandHandler) handleAddRole(s *discordgo.Session, i *discordgo.Intera
 	reply(s, i, fmt.Sprintf("✅ Added: %s → <@&%s>", emoji, role.ID))
 }
 
-func (h *CommandHandler) handleRemoveRole(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (m *Manager) handleRemoveRole(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	options := i.ApplicationCommandData().Options
 	emoji := strings.TrimSpace(options[0].StringValue())
 
-	roleID, _ := h.store.RoleForEmoji(emoji)
+	roleID, _ := m.store.RoleForEmoji(emoji)
 
-	if err := h.store.Remove(emoji); err != nil {
+	if err := m.store.Remove(emoji); err != nil {
 		reply(s, i, fmt.Sprintf("Error: %s", err.Error()))
 		return
 	}
 
-	if err := h.updateMessage(); err != nil {
-		_ = h.store.Add(emoji, roleID)
+	if err := m.updateRoleMessage(s); err != nil {
+		_ = m.store.Add(emoji, roleID)
 		reply(s, i, fmt.Sprintf("Error: failed to update role message: %s", err.Error()))
 		return
 	}
 
-	msgID := h.store.MessageID()
+	msgID := m.store.MessageID()
 	if msgID != "" {
-		if err := s.MessageReactionsRemoveEmoji(h.roleChannelID, msgID, util.EmojiForAPI(emoji)); err != nil {
+		if err := s.MessageReactionsRemoveEmoji(m.roleChannelID, msgID, EmojiForAPI(emoji)); err != nil {
 			log.Printf("failed to remove all reactions for %s: %v", emoji, err)
 		}
 	}

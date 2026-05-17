@@ -31,14 +31,18 @@ type LLMConfig struct {
 	RequestTimeout   time.Duration
 }
 
+type RolesConfig struct {
+	ChannelID     string
+	MessageHeader string
+}
+
 type AppConfig struct {
 	Token             string
-	RoleChannelID     string
 	AdminChannelID    string
 	LeetcodeChannelID string
-	RoleMessageHeader string
 	Location          *time.Location
 	LLM               LLMConfig
+	Roles             RolesConfig
 }
 
 func Load() (*AppConfig, error) {
@@ -75,12 +79,14 @@ func Load() (*AppConfig, error) {
 
 	return &AppConfig{
 		Token:             token,
-		RoleChannelID:     channelID,
 		AdminChannelID:    adminChannelID,
 		LeetcodeChannelID: os.Getenv("LEETCODE_CHANNEL_ID"),
-		RoleMessageHeader: header,
 		Location:          loc,
 		LLM:               loadLLMConfig(),
+		Roles: RolesConfig{
+			ChannelID:     channelID,
+			MessageHeader: header,
+		},
 	}, nil
 }
 

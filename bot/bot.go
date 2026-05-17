@@ -1,17 +1,15 @@
 package bot
 
 import (
+	"context"
 	"dcbot/config"
-	"dcbot/handlers"
+	"dcbot/domain"
+	"dcbot/modules/chat"
+	"dcbot/modules/roles"
 	"dcbot/scheduler"
 	"dcbot/scheduler/tasks"
-	"dcbot/store"
-	"dcbot/util"
 	"fmt"
 	"log"
-	"regexp"
-	"slices"
-	"sort"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -20,12 +18,15 @@ import (
 type Bot struct {
 	session        *discordgo.Session
 	cfg            *config.AppConfig
-	store          *store.RoleStore
 	scheduler      *scheduler.Scheduler
+	modules        []domain.Module
+	commandTable   map[string]domain.InteractionHandler
 	registeredCmds []*discordgo.ApplicationCommand
+	rootCtx        context.Context
+	cancel         context.CancelFunc
 }
 
-func New(cfg *config.AppConfig, st *store.RoleStore) (*Bot, error) {
+func New(cfg *config.AppConfig) (*Bot, error) {
 	session, err := discordgo.New("Bot " + cfg.Token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
@@ -34,44 +35,44 @@ func New(cfg *config.AppConfig, st *store.RoleStore) (*Bot, error) {
 		discordgo.IntentsGuildMessageReactions |
 		discordgo.IntentsGuildMembers
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Bot{
-		session:   session,
-		cfg:       cfg,
-		store:     st,
-		scheduler: scheduler.New(session, cfg.AdminChannelID, cfg.Location),
+		session:      session,
+		cfg:          cfg,
+		scheduler:    scheduler.New(session, cfg.AdminChannelID, cfg.Location),
+		commandTable: make(map[string]domain.InteractionHandler),
+		rootCtx:      ctx,
+		cancel:       cancel,
 	}, nil
 }
 
 func (b *Bot) Start() error {
-	// cmdHandler dispatches user-invoked slash commands (e.g. /addrole).
-	cmdHandler := handlers.NewCommandHandler(b.store, b.cfg.RoleChannelID, b.cfg.AdminChannelID, b.updateRoleMessage)
+	rolesHandler, err := roles.New(b.cfg.Roles, b.cfg.AdminChannelID)
+	if err != nil {
+		return fmt.Errorf("init roles handler: %w", err)
+	}
 
-	chatHandler, err := handlers.NewChatHandler(b.cfg.LLM, b.cfg.Location)
+	chatHandler, err := chat.New(b.cfg.LLM, b.cfg.Location)
 	if err != nil {
 		return fmt.Errorf("init chat handler: %w", err)
 	}
+	b.modules = []domain.Module{rolesHandler, chatHandler}
 
-	b.session.AddHandler(handlers.ReactionAdd(b.session, b.store))
-	b.session.AddHandler(handlers.ReactionRemove(b.session, b.store))
-	b.session.AddHandler(cmdHandler.Handle)
-	b.session.AddHandler(chatHandler.Handle)
+	b.registerEventSubscribers()
+	b.session.AddHandler(b.dispatchInteraction)
 
-	errCh := make(chan error, 1)
+	readyErr := make(chan error, 1)
 	b.session.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Logged in as %s", s.State.User.Username)
-		b.registerCommands(s, r)
-		if err := b.syncOnStartup(s); err != nil {
-			errCh <- fmt.Errorf("startup sync error: %v", err)
-			return
-		}
-		errCh <- nil
+		b.registerCommandProviders(s, r)
+		readyErr <- b.runReadyHooks(s, r)
 	})
 
 	if err := b.session.Open(); err != nil {
 		return err
 	}
 
-	if err := <-errCh; err != nil {
+	if err := <-readyErr; err != nil {
 		b.Stop()
 		return err
 	}
@@ -88,6 +89,7 @@ func (b *Bot) Start() error {
 }
 
 func (b *Bot) Stop() {
+	b.cancel()
 	b.scheduler.Stop()
 	for _, cmd := range b.registeredCmds {
 		guilds := b.session.State.Guilds
@@ -100,212 +102,99 @@ func (b *Bot) Stop() {
 	b.session.Close()
 }
 
-func (b *Bot) registerCommands(s *discordgo.Session, r *discordgo.Ready) {
-	for _, guild := range r.Guilds {
-		for _, cmd := range handlers.Commands {
-			registered, err := s.ApplicationCommandCreate(s.State.User.ID, guild.ID, cmd)
-			if err != nil {
-				log.Printf("failed to register command %s in guild %s: %v", cmd.Name, guild.ID, err)
-				continue
-			}
-			b.registeredCmds = append(b.registeredCmds, registered)
+func (b *Bot) registerEventSubscribers() {
+	for _, m := range b.modules {
+		sub, ok := m.(domain.EventSubscriber)
+		if !ok {
+			continue
 		}
+		sub.RegisterHandlers(b.session)
+		log.Printf("[%s] registered event handlers", m.Name())
 	}
 }
 
-func (b *Bot) syncOnStartup(s *discordgo.Session) error {
-	msgID, err := b.ensureRoleMessage(s)
-	if err != nil {
-		return fmt.Errorf("ensureRoleMessage: %w", err)
-	}
-
-	if err := b.syncReactions(s, msgID); err != nil {
-		log.Printf("syncReactions warning: %v", err)
-	}
-
-	if err := b.syncMemberRoles(s, msgID); err != nil {
-		log.Printf("syncMemberRoles warning: %v", err)
-	}
-
-	return nil
-}
-
-func (b *Bot) ensureRoleMessage(s *discordgo.Session) (string, error) {
-	// Try saved ID first as a fast path, then fall back to scanning the channel.
-	msgID, mappings, err := func() (string, map[string]string, error) {
-		if savedID := b.store.MessageID(); savedID != "" {
-			msg, err := s.ChannelMessage(b.cfg.RoleChannelID, savedID)
-			if err == nil {
-				return msg.ID, parseRoleMessage(msg.Content), nil
-			}
-			log.Printf("saved message not found (%v), scanning channel", err)
+func (b *Bot) registerCommandProviders(s *discordgo.Session, r *discordgo.Ready) {
+	for _, m := range b.modules {
+		cp, ok := m.(domain.CommandProvider)
+		if !ok {
+			continue
 		}
-		return b.findExistingRoleMessage(s)
-	}()
-
-	if err != nil {
-		return "", fmt.Errorf("failed to locate role message: %w", err)
-	}
-
-	if msgID != "" {
-		// Discord is source of truth — sync store from message content.
-		if err := b.store.SetMappings(mappings); err != nil {
-			log.Printf("failed to sync mappings from Discord: %v", err)
-		}
-		if err := b.store.SetMessageID(msgID); err != nil {
-			return "", fmt.Errorf("failed to save message_id: %w", err)
-		}
-		log.Printf("loaded %d role mapping(s) from Discord message %s", len(mappings), msgID)
-		return msgID, nil
-	}
-
-	// No message on Discord — create one from whatever is in the store.
-	content := buildRoleMessageContent(b.cfg.RoleMessageHeader, b.store.Roles())
-	msg, err := s.ChannelMessageSend(b.cfg.RoleChannelID, content)
-	if err != nil {
-		return "", fmt.Errorf("failed to send role message: %w", err)
-	}
-	if err := b.store.SetMessageID(msg.ID); err != nil {
-		return "", fmt.Errorf("failed to save message_id: %w", err)
-	}
-	return msg.ID, nil
-}
-
-func (b *Bot) findExistingRoleMessage(s *discordgo.Session) (string, map[string]string, error) {
-	msgs, err := s.ChannelMessages(b.cfg.RoleChannelID, 1, "", "", "")
-	if err != nil {
-		return "", nil, err
-	}
-	if len(msgs) == 1 && msgs[0].Author.ID == s.State.User.ID {
-		return msgs[0].ID, parseRoleMessage(msgs[0].Content), nil
-	}
-	return "", nil, nil
-}
-
-var roleLineRe = regexp.MustCompile(`^(.+) → <@&(\d+)>$`)
-
-func parseRoleMessage(content string) map[string]string {
-	parts := strings.SplitN(content, "\n---\n", 2)
-	if len(parts) < 2 {
-		return nil
-	}
-	roles := make(map[string]string)
-	for _, line := range strings.Split(strings.TrimRight(parts[1], "\n"), "\n") {
-		if m := roleLineRe.FindStringSubmatch(line); m != nil {
-			roles[m[1]] = m[2]
-		}
-	}
-	return roles
-}
-
-func (b *Bot) updateRoleMessage() error {
-	msgID := b.store.MessageID()
-	if msgID == "" {
-		return nil
-	}
-	content := buildRoleMessageContent(b.cfg.RoleMessageHeader, b.store.Roles())
-	_, err := b.session.ChannelMessageEdit(b.cfg.RoleChannelID, msgID, content)
-	return err
-}
-
-func (b *Bot) syncReactions(s *discordgo.Session, msgID string) error {
-	roles := b.store.Roles()
-
-	msg, err := s.ChannelMessage(b.cfg.RoleChannelID, msgID)
-	if err != nil {
-		return err
-	}
-
-	existingReactions := make(map[string]bool)
-	for _, r := range msg.Reactions {
-		existingReactions[util.EmojiFromReaction(*r.Emoji)] = true
-	}
-
-	for emoji := range roles {
-		if !existingReactions[emoji] {
-			if err := s.MessageReactionAdd(b.cfg.RoleChannelID, msgID, util.EmojiForAPI(emoji)); err != nil {
-				log.Printf("failed to add reaction %s: %v", emoji, err)
-			}
-		}
-	}
-
-	for emoji := range existingReactions {
-		if _, mapped := roles[emoji]; !mapped {
-			if err := s.MessageReactionRemove(b.cfg.RoleChannelID, msgID, util.EmojiForAPI(emoji), s.State.User.ID); err != nil {
-				log.Printf("failed to remove stale reaction %s: %v", emoji, err)
-			}
-		}
-	}
-
-	return nil
-}
-
-func (b *Bot) syncMemberRoles(s *discordgo.Session, msgID string) error {
-	roles := b.store.Roles()
-	if len(roles) == 0 {
-		return nil
-	}
-
-	ch, err := s.Channel(b.cfg.RoleChannelID)
-	if err != nil {
-		return fmt.Errorf("failed to resolve guild from role channel: %w", err)
-	}
-	guildID := ch.GuildID
-
-	for emoji, roleID := range roles {
-		after := ""
-		for {
-			users, err := s.MessageReactions(b.cfg.RoleChannelID, msgID, util.EmojiForAPI(emoji), 100, "", after)
-			if err != nil {
-				log.Printf("failed to fetch reactions for %s: %v", emoji, err)
-				break
-			}
-
-			for _, u := range users {
-				if u.ID == s.State.User.ID {
-					continue
-				}
-				member, err := s.GuildMember(guildID, u.ID)
+		for _, cmd := range cp.Commands() {
+			b.commandTable[cmd.Definition.Name] = cmd.Handler
+			log.Printf("[%s] /%s — %s (allowed: %s)",
+				m.Name(),
+				cmd.Definition.Name,
+				cmd.Definition.Description,
+				describePermissions(cmd.Definition.DefaultMemberPermissions),
+			)
+			for _, guild := range r.Guilds {
+				registered, err := s.ApplicationCommandCreate(s.State.User.ID, guild.ID, cmd.Definition)
 				if err != nil {
+					log.Printf("[%s] failed to register command %s in guild %s: %v", m.Name(), cmd.Definition.Name, guild.ID, err)
 					continue
 				}
-				if !hasMemberRole(member, roleID) {
-					if err := s.GuildMemberRoleAdd(guildID, u.ID, roleID); err != nil {
-						log.Printf("sync: failed to add role to %s: %v", u.ID, err)
-					}
-				}
+				b.registeredCmds = append(b.registeredCmds, registered)
 			}
-
-			if len(users) < 100 {
-				break
-			}
-			after = users[len(users)-1].ID
 		}
 	}
+}
 
+var knownPermissions = []struct {
+	bit  int64
+	name string
+}{
+	{discordgo.PermissionAdministrator, "Administrator"},
+	{discordgo.PermissionManageRoles, "ManageRoles"},
+	{discordgo.PermissionManageChannels, "ManageChannels"},
+	{discordgo.PermissionManageMessages, "ManageMessages"},
+	{discordgo.PermissionManageWebhooks, "ManageWebhooks"},
+	{discordgo.PermissionKickMembers, "KickMembers"},
+	{discordgo.PermissionBanMembers, "BanMembers"},
+	{discordgo.PermissionModerateMembers, "ModerateMembers"},
+}
+
+// describePermissions renders DefaultMemberPermissions for log output.
+// nil = no restriction (everyone); 0 = hidden from everyone except admins.
+func describePermissions(p *int64) string {
+	if p == nil {
+		return "everyone"
+	}
+	if *p == 0 {
+		return "admins only"
+	}
+	var names []string
+	remaining := *p
+	for _, kp := range knownPermissions {
+		if remaining&kp.bit != 0 {
+			names = append(names, kp.name)
+			remaining &^= kp.bit
+		}
+	}
+	if remaining != 0 {
+		names = append(names, fmt.Sprintf("0x%x", remaining))
+	}
+	return strings.Join(names, "+")
+}
+
+func (b *Bot) runReadyHooks(s *discordgo.Session, r *discordgo.Ready) error {
+	for _, m := range b.modules {
+		hook, ok := m.(domain.ReadyHook)
+		if !ok {
+			continue
+		}
+		if err := hook.OnReady(b.rootCtx, s, r); err != nil {
+			return fmt.Errorf("%s OnReady: %w", m.Name(), err)
+		}
+		log.Printf("[%s] ready hook complete", m.Name())
+	}
 	return nil
 }
 
-func hasMemberRole(member *discordgo.Member, roleID string) bool {
-	return slices.Contains(member.Roles, roleID)
-}
-
-func buildRoleMessageContent(header string, roles map[string]string) string {
-	if len(roles) == 0 {
-		return header + "\n\nNo roles configured yet. An admin can use `/addrole` to add roles."
+func (b *Bot) dispatchInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
 	}
-
-	emojis := make([]string, 0, len(roles))
-	for emoji := range roles {
-		emojis = append(emojis, emoji)
+	if h, ok := b.commandTable[i.ApplicationCommandData().Name]; ok {
+		h(s, i)
 	}
-	sort.Strings(emojis)
-
-	var sb strings.Builder
-	sb.WriteString(header)
-	sb.WriteString("\n---\n")
-	for _, emoji := range emojis {
-		fmt.Fprintf(&sb, "%s → <@&%s>\n", emoji, roles[emoji])
-	}
-	return sb.String()
 }

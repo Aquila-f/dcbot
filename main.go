@@ -3,7 +3,6 @@ package main
 import (
 	"dcbot/bot"
 	"dcbot/config"
-	"dcbot/store"
 	"log"
 	"os"
 	"os/signal"
@@ -16,12 +15,7 @@ func main() {
 		log.Fatal("config error: ", err)
 	}
 
-	st, err := store.Load()
-	if err != nil {
-		log.Fatal("store error: ", err)
-	}
-
-	b, err := bot.New(cfg, st)
+	b, err := bot.New(cfg)
 	if err != nil {
 		log.Fatal("bot init error: ", err)
 	}

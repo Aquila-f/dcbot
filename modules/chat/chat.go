@@ -1,15 +1,16 @@
-package handlers
+package chat
 
 import (
 	"context"
-"dcbot/config"
+	"dcbot/config"
+	"dcbot/domain"
 	"dcbot/llm"
-"fmt"
+	"fmt"
 	"log"
 	"regexp"
-"sort"
+	"sort"
 	"strings"
-"time"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -19,25 +20,36 @@ const (
 	discordMessageLimit = 2000
 )
 
-type ChatHandler struct {
+var (
+	_ domain.Module          = (*Handler)(nil)
+	_ domain.EventSubscriber = (*Handler)(nil)
+)
+
+type Handler struct {
 	llm     *llm.Client
 	persona *llm.Persona
 	depth   int
 }
 
-func NewChatHandler(cfg config.LLMConfig, loc *time.Location) (*ChatHandler, error) {
-persona, err := llm.NewPersona(cfg.SystemPromptPath, loc)
+func (h *Handler) Name() string { return "chat" }
+
+func (h *Handler) RegisterHandlers(s *discordgo.Session) {
+	s.AddHandler(h.Handle)
+}
+
+func New(cfg config.LLMConfig, loc *time.Location) (*Handler, error) {
+	persona, err := llm.NewPersona(cfg.SystemPromptPath, loc)
 	if err != nil {
 		return nil, fmt.Errorf("load persona: %w", err)
 	}
-depth := cfg.HistoryDepth
+	depth := cfg.HistoryDepth
 	if depth <= 0 {
 		depth = 5
 	}
-	return &ChatHandler{llm: llm.New(cfg), persona: persona, depth: depth}, nil
+	return &Handler{llm: llm.New(cfg), persona: persona, depth: depth}, nil
 }
 
-func (h *ChatHandler) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
+func (h *Handler) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author == nil {
 		return
 	}
@@ -87,7 +99,7 @@ func (h *ChatHandler) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 }
 
-func (h *ChatHandler) triggered(s *discordgo.Session, m *discordgo.MessageCreate, botID string) bool {
+func (h *Handler) triggered(s *discordgo.Session, m *discordgo.MessageCreate, botID string) bool {
 	for _, u := range m.Mentions {
 		if u.ID == botID {
 			return true
@@ -103,17 +115,58 @@ func (h *ChatHandler) triggered(s *discordgo.Session, m *discordgo.MessageCreate
 }
 
 // fetchHistory returns messages in chronological order (oldest first), excluding m itself.
-func (h *ChatHandler) fetchHistory(s *discordgo.Session, m *discordgo.MessageCreate) []*discordgo.Message {
-	if h.depth == 0 {
+// Sources, combined and deduped by message ID:
+//   1. Reply chain walked up from m.MessageReference (up to depth)
+//   2. Time-window fill from m.ChannelID before m.ID (until depth total)
+//   3. Thread parent message (always-on, exempt from depth budget)
+func (h *Handler) fetchHistory(s *discordgo.Session, m *discordgo.MessageCreate) []*discordgo.Message {
+	if h.depth <= 0 {
 		return nil
 	}
-	if m.MessageReference != nil && m.MessageReference.MessageID != "" {
-		return h.fetchReplyChain(s, m.MessageReference, h.depth)
+
+	seen := map[string]bool{m.ID: true}
+	collected := make([]*discordgo.Message, 0, h.depth+1)
+
+	add := func(msg *discordgo.Message) {
+		if msg == nil || msg.ID == "" || seen[msg.ID] {
+			return
+		}
+		seen[msg.ID] = true
+		collected = append(collected, msg)
 	}
-	return h.fetchTimeWindow(s, m.ChannelID, m.ID, h.depth)
+
+	if m.MessageReference != nil && m.MessageReference.MessageID != "" {
+		for _, msg := range h.walkReplyChain(s, m.MessageReference, h.depth) {
+			add(msg)
+			if len(collected) >= h.depth {
+				break
+			}
+		}
+	}
+
+	if len(collected) < h.depth {
+		need := h.depth - len(collected)
+		// over-fetch to absorb dedup losses; toLLMMessage will filter again later
+		for _, msg := range h.fetchTimeWindow(s, m.ChannelID, m.ID, need+5) {
+			add(msg)
+			if len(collected) >= h.depth {
+				break
+			}
+		}
+	}
+
+	if parent := h.fetchThreadParent(s, m.ChannelID); parent != nil {
+		add(parent)
+	}
+
+	sort.SliceStable(collected, func(i, j int) bool {
+		return collected[i].Timestamp.Before(collected[j].Timestamp)
+	})
+	return collected
 }
 
-func (h *ChatHandler) fetchReplyChain(s *discordgo.Session, ref *discordgo.MessageReference, depth int) []*discordgo.Message {
+// walkReplyChain returns messages in newest-first order (caller sorts globally).
+func (h *Handler) walkReplyChain(s *discordgo.Session, ref *discordgo.MessageReference, depth int) []*discordgo.Message {
 	chain := make([]*discordgo.Message, 0, depth)
 	cur := ref
 	for i := 0; i < depth && cur != nil && cur.MessageID != ""; i++ {
@@ -125,27 +178,35 @@ func (h *ChatHandler) fetchReplyChain(s *discordgo.Session, ref *discordgo.Messa
 		chain = append(chain, msg)
 		cur = msg.MessageReference
 	}
-	// chain is newest-first; reverse to chronological.
-	for i, j := 0, len(chain)-1; i < j; i, j = i+1, j-1 {
-		chain[i], chain[j] = chain[j], chain[i]
-	}
 	return chain
 }
 
-func (h *ChatHandler) fetchTimeWindow(s *discordgo.Session, channelID, beforeID string, depth int) []*discordgo.Message {
-	msgs, err := s.ChannelMessages(channelID, depth, beforeID, "", "")
+// fetchTimeWindow returns messages in newest-first order (caller sorts globally).
+func (h *Handler) fetchTimeWindow(s *discordgo.Session, channelID, beforeID string, limit int) []*discordgo.Message {
+	msgs, err := s.ChannelMessages(channelID, limit, beforeID, "", "")
 	if err != nil {
 		log.Printf("[chat] fetch history: %v", err)
 		return nil
 	}
-	// Discord returns newest-first; reverse to chronological.
-	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
-		msgs[i], msgs[j] = msgs[j], msgs[i]
-	}
 	return msgs
 }
 
-func (h *ChatHandler) buildMessages(history []*discordgo.Message, current *discordgo.MessageCreate, botID string) []llm.Message {
+// fetchThreadParent returns the starter message that a thread was opened from,
+// or nil if the channel isn't a thread or has no accessible starter message.
+func (h *Handler) fetchThreadParent(s *discordgo.Session, channelID string) *discordgo.Message {
+	ch, err := s.Channel(channelID)
+	if err != nil || ch == nil || !ch.IsThread() || ch.ParentID == "" {
+		return nil
+	}
+	// For threads created from a message, thread ID == starter message ID, living in the parent channel.
+	parent, err := s.ChannelMessage(ch.ParentID, channelID)
+	if err != nil {
+		return nil
+	}
+	return parent
+}
+
+func (h *Handler) buildMessages(history []*discordgo.Message, current *discordgo.MessageCreate, botID string) []llm.Message {
 	out := h.persona.Messages()
 	for _, msg := range history {
 		if conv, ok := toLLMMessage(msg, botID); ok {

@@ -1,4 +1,4 @@
-package store
+package roles
 
 import (
 	"encoding/json"
@@ -9,22 +9,22 @@ import (
 
 const storeFile = "roles.json"
 
-type data struct {
+type storeData struct {
 	MessageID string            `json:"message_id"`
 	Roles     map[string]string `json:"roles"` // emoji → role_id
 }
 
-type RoleStore struct {
+type roleStore struct {
 	mu sync.RWMutex
-	d  data
+	d  storeData
 }
 
-func Load() (*RoleStore, error) {
-	s := &RoleStore{}
+func loadStore() (*roleStore, error) {
+	s := &roleStore{}
 
 	bytes, err := os.ReadFile(storeFile)
 	if os.IsNotExist(err) {
-		s.d = data{Roles: make(map[string]string)}
+		s.d = storeData{Roles: make(map[string]string)}
 		return s, nil
 	}
 	if err != nil {
@@ -42,7 +42,7 @@ func Load() (*RoleStore, error) {
 	return s, nil
 }
 
-func (s *RoleStore) save() error {
+func (s *roleStore) save() error {
 	bytes, err := json.MarshalIndent(s.d, "", "  ")
 	if err != nil {
 		return err
@@ -54,20 +54,20 @@ func (s *RoleStore) save() error {
 	return os.Rename(tmp, storeFile)
 }
 
-func (s *RoleStore) MessageID() string {
+func (s *roleStore) MessageID() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.d.MessageID
 }
 
-func (s *RoleStore) SetMessageID(id string) error {
+func (s *roleStore) SetMessageID(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.d.MessageID = id
 	return s.save()
 }
 
-func (s *RoleStore) Roles() map[string]string {
+func (s *roleStore) Roles() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	copy := make(map[string]string, len(s.d.Roles))
@@ -77,14 +77,14 @@ func (s *RoleStore) Roles() map[string]string {
 	return copy
 }
 
-func (s *RoleStore) RoleForEmoji(emoji string) (string, bool) {
+func (s *roleStore) RoleForEmoji(emoji string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	roleID, ok := s.d.Roles[emoji]
 	return roleID, ok
 }
 
-func (s *RoleStore) Add(emoji, roleID string) error {
+func (s *roleStore) Add(emoji, roleID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -105,7 +105,7 @@ func (s *RoleStore) Add(emoji, roleID string) error {
 	return nil
 }
 
-func (s *RoleStore) SetMappings(roles map[string]string) error {
+func (s *roleStore) SetMappings(roles map[string]string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -118,7 +118,7 @@ func (s *RoleStore) SetMappings(roles map[string]string) error {
 	return nil
 }
 
-func (s *RoleStore) Remove(emoji string) error {
+func (s *roleStore) Remove(emoji string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
