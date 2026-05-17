@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"dcbot/domain"
 	"fmt"
 	"log"
 	"time"
@@ -34,7 +35,7 @@ func newWithSender(sender messageSender, adminChannelID string, loc *time.Locati
 	}
 }
 
-func (s *Scheduler) Register(spec string, t Task) error {
+func (s *Scheduler) Register(spec string, t domain.Task) error {
 	_, err := s.cron.AddFunc(spec, func() { s.run(t) })
 	if err != nil {
 		return fmt.Errorf("register task %q: %w", t.Name(), err)
@@ -50,7 +51,7 @@ func (s *Scheduler) Stop() {
 	<-s.cron.Stop().Done()
 }
 
-func (s *Scheduler) run(t Task) {
+func (s *Scheduler) run(t domain.Task) {
 	ctx, cancel := context.WithTimeout(context.Background(), taskTimeout)
 	defer cancel()
 

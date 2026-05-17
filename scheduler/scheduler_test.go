@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"dcbot/domain"
 	"errors"
 	"strings"
 	"sync"
@@ -40,12 +41,12 @@ func (f *fakeSender) calls() []sendCall {
 
 type fakeTask struct {
 	name    string
-	payload Payload
+	payload domain.Payload
 	err     error
 }
 
-func (t fakeTask) Name() string                                { return t.name }
-func (t fakeTask) Build(_ context.Context) (Payload, error)    { return t.payload, t.err }
+func (t fakeTask) Name() string                                    { return t.name }
+func (t fakeTask) Build(_ context.Context) (domain.Payload, error) { return t.payload, t.err }
 
 func newTestScheduler(sender messageSender, adminChannelID string) *Scheduler {
 	return newWithSender(sender, adminChannelID, time.UTC)
@@ -72,7 +73,7 @@ func TestRun_SuccessSendsPayload(t *testing.T) {
 
 	s.run(fakeTask{
 		name:    "demo",
-		payload: Payload{ChannelID: "target-channel", Content: "hello"},
+		payload: domain.Payload{ChannelID: "target-channel", Content: "hello"},
 	})
 
 	calls := sender.calls()
@@ -111,7 +112,7 @@ func TestRun_SendFailureNotifiesAdmin(t *testing.T) {
 
 	s.run(fakeTask{
 		name:    "demo",
-		payload: Payload{ChannelID: "target-channel", Content: "hello"},
+		payload: domain.Payload{ChannelID: "target-channel", Content: "hello"},
 	})
 
 	calls := sender.calls()

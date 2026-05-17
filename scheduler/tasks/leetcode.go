@@ -3,7 +3,7 @@ package tasks
 import (
 	"bytes"
 	"context"
-	"dcbot/scheduler"
+	"dcbot/domain"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,7 +49,7 @@ type dailyQuestion struct {
 
 func (l *LeetcodeDaily) Name() string { return "leetcode-daily" }
 
-func (l *LeetcodeDaily) Build(ctx context.Context) (scheduler.Payload, error) {
+func (l *LeetcodeDaily) Build(ctx context.Context) (domain.Payload, error) {
 	client := l.Client
 	if client == nil {
 		client = http.DefaultClient
@@ -57,12 +57,12 @@ func (l *LeetcodeDaily) Build(ctx context.Context) (scheduler.Payload, error) {
 
 	q, err := l.fetchDaily(ctx, client)
 	if err != nil {
-		return scheduler.Payload{}, err
+		return domain.Payload{}, err
 	}
 
 	rating := l.fetchRating(ctx, client, q.ID)
 
-	return scheduler.Payload{
+	return domain.Payload{
 		ChannelID: l.ChannelID,
 		Embeds:    []*discordgo.MessageEmbed{buildEmbed(q, rating)},
 	}, nil
