@@ -91,12 +91,10 @@ func (b *Bot) Start() error {
 func (b *Bot) Stop() {
 	b.cancel()
 	b.scheduler.Stop()
+	appID := b.session.State.User.ID
 	for _, cmd := range b.registeredCmds {
-		guilds := b.session.State.Guilds
-		for _, g := range guilds {
-			if err := b.session.ApplicationCommandDelete(b.session.State.User.ID, g.ID, cmd.ID); err != nil {
-				log.Printf("failed to delete command %s: %v", cmd.Name, err)
-			}
+		if err := b.session.ApplicationCommandDelete(appID, cmd.GuildID, cmd.ID); err != nil {
+			log.Printf("failed to delete command %s in guild %s: %v", cmd.Name, cmd.GuildID, err)
 		}
 	}
 	b.session.Close()
